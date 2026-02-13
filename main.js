@@ -3,7 +3,6 @@ precision mediump float;
 
 attribute vec2 vertPosition;
 
-// movement + size
 uniform vec2 uCenter;
 uniform float uRadius;
 uniform float uAspect;
@@ -32,7 +31,7 @@ async function main() {
   // -----------------------------------------------
   // Device orientation gravity (tilt)
   // -----------------------------------------------
-  let gravity = [0, -1]; // Always in [-1, +1] both axes (scaled later)
+  let gravity = [0, -1];
   let hardwareWorking = false;
 
   function handleOrientation(event) {
@@ -47,19 +46,18 @@ async function main() {
 
     hardwareWorking = true;
 
-    // constrain x to [-90, 90] so we don't require upside-down device
     if (x > 90) x = 90;
     if (x < -90) x = -90;
 
     gravity[0] = y / 90;   // -1..1
-    gravity[1] = -x / 90;  // -1..1 (flip so screen coords feel right)
+    gravity[1] = -x / 90;  // -1..1
   }
 
   if (!(window.DeviceOrientationEvent == undefined)) {
     window.addEventListener("deviceorientation", handleOrientation, true);
   }
 
-  // For iOS/Safari permission flow (works on iPhone/iPad)
+  // iOS permission button
   if (DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === "function") {
     const button = document.createElement("button");
     button.innerText = "Enable Device Orientation";
@@ -84,7 +82,6 @@ async function main() {
   // -----------------------------------------------
   const canvas = document.getElementById("glcanvas");
 
-  // Per PWA instructions: size canvas from its CSS/display size, not HTML attrs
   function resizeCanvasToDisplaySize() {
     const dpr = window.devicePixelRatio || 1;
     const displayWidth = Math.floor(canvas.clientWidth * dpr);
@@ -124,7 +121,7 @@ async function main() {
   updateViewportAndAspect();
 
   // -----------------------------------------------
-  // Geometry: circle vertices (TRIANGLE_FAN)
+  // Geometry: circle vertices
   // -----------------------------------------------
   function createCircleVertices(sides) {
     const positions = [];
@@ -161,69 +158,10 @@ async function main() {
     return min + Math.random() * (max - min);
   }
 
-  // Resolve collisions for all circle pairs:
-  // - positional correction removes overlap (prevents sticking)
-  // - impulse updates velocities (bounce)
-  function resolveCircleCollisions(circles) {
-    const restitution = 0.98; // bounciness (1 = perfectly elastic)
-    const slop = 0.0005;      // tolerance to reduce jitter
-    const percent = 0.8;      // how strongly we separate overlap
-
-    for (let i = 0; i < circles.length; i++) {
-      for (let j = i + 1; j < circles.length; j++) {
-        const a = circles[i];
-        const b = circles[j];
-
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const r = a.radius + b.radius;
-
-        const dist2 = dx * dx + dy * dy;
-        if (dist2 >= r * r) continue; // not overlapping
-
-        let dist = Math.sqrt(dist2);
-        if (dist < 1e-8) dist = 1e-8; // avoid divide-by-zero
-
-        // collision normal (a -> b)
-        const nx = dx / dist;
-        const ny = dy / dist;
-
-        // --- positional correction (push apart)
-        const penetration = r - dist;
-        const correctionMag = Math.max(penetration - slop, 0) * percent;
-
-        // mass proportional to area (radius^2)
-        const massA = a.radius * a.radius;
-        const massB = b.radius * b.radius;
-        const invMassA = 1 / massA;
-        const invMassB = 1 / massB;
-        const invMassSum = invMassA + invMassB;
-
-        a.x -= (correctionMag * nx) * (invMassA / invMassSum);
-        a.y -= (correctionMag * ny) * (invMassA / invMassSum);
-        b.x += (correctionMag * nx) * (invMassB / invMassSum);
-        b.y += (correctionMag * ny) * (invMassB / invMassSum);
-
-        // --- impulse (bounce)
-        const rvx = b.vx - a.vx;
-        const rvy = b.vy - a.vy;
-
-        const velAlongNormal = rvx * nx + rvy * ny;
-
-        // if separating, no impulse
-        if (velAlongNormal > 0) continue;
-
-        const jImpulse = -(1 + restitution) * velAlongNormal / invMassSum;
-
-        const impulseX = jImpulse * nx;
-        const impulseY = jImpulse * ny;
-
-        a.vx -= impulseX * invMassA;
-        a.vy -= impulseY * invMassA;
-        b.vx += impulseX * invMassB;
-        b.vy += impulseY * invMassB;
-      }
-    }
+  // Map world [-1..1] to bucket coordinate
+  // bucketSize in "world units" (so the whole width is 2)
+  function bucketKey(ix, iy) {
+    return `${ix},${iy}`;
   }
 
   // -----------------------------------------------
@@ -240,23 +178,19 @@ async function main() {
     }
 
     update(dt) {
-      // gravity[] is [-1..1]. Scale to feel good.
       const gStrength = 1.2;
 
-      // Apply gravity
       this.vx += gravity[0] * gStrength * dt;
       this.vy += gravity[1] * gStrength * dt;
 
-      // Light air damping (keeps things from exploding)
       const damping = 0.995;
       this.vx *= damping;
       this.vy *= damping;
 
-      // Integrate position
       this.x += this.vx * dt;
       this.y += this.vy * dt;
 
-      // Wall collisions (bounce)
+      // Wall bounce
       if (this.x + this.radius > 1) {
         this.x = 1 - this.radius;
         this.vx *= -1;
@@ -282,7 +216,115 @@ async function main() {
     }
   }
 
-  // Make circles
+  // -----------------------------------------------
+  // Collision (Buckets + Impulse)
+  // -----------------------------------------------
+  function resolvePair(a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const r = a.radius + b.radius;
+
+    const dist2 = dx * dx + dy * dy;
+    if (dist2 >= r * r) return; // no collision
+
+    let dist = Math.sqrt(dist2);
+    if (dist < 1e-8) dist = 1e-8;
+
+    const nx = dx / dist;
+    const ny = dy / dist;
+
+    // --- positional correction to remove overlap
+    const restitution = 0.98;
+    const slop = 0.0005;
+    const percent = 0.8;
+
+    const penetration = r - dist;
+    const correctionMag = Math.max(penetration - slop, 0) * percent;
+
+    const massA = a.radius * a.radius;
+    const massB = b.radius * b.radius;
+    const invMassA = 1 / massA;
+    const invMassB = 1 / massB;
+    const invMassSum = invMassA + invMassB;
+
+    a.x -= (correctionMag * nx) * (invMassA / invMassSum);
+    a.y -= (correctionMag * ny) * (invMassA / invMassSum);
+    b.x += (correctionMag * nx) * (invMassB / invMassSum);
+    b.y += (correctionMag * ny) * (invMassB / invMassSum);
+
+    // --- impulse bounce
+    const rvx = b.vx - a.vx;
+    const rvy = b.vy - a.vy;
+    const velAlongNormal = rvx * nx + rvy * ny;
+
+    // Already separating? skip impulse
+    if (velAlongNormal > 0) return;
+
+    const jImpulse = -(1 + restitution) * velAlongNormal / invMassSum;
+    const impulseX = jImpulse * nx;
+    const impulseY = jImpulse * ny;
+
+    a.vx -= impulseX * invMassA;
+    a.vy -= impulseY * invMassA;
+    b.vx += impulseX * invMassB;
+    b.vy += impulseY * invMassB;
+  }
+
+  function resolveCircleCollisionsBuckets(circles) {
+    // bucket size: choose based on max diameter so near-circles end up nearby
+    // Since radius is in [0.03..0.12], max diameter ~ 0.24; use a bit bigger.
+    const bucketSize = 0.28;
+
+    const buckets = new Map();
+
+    // Build buckets
+    for (let i = 0; i < circles.length; i++) {
+      const c = circles[i];
+
+      // translate world coords [-1..1] to bucket coords
+      const ix = Math.floor((c.x + 1) / bucketSize);
+      const iy = Math.floor((c.y + 1) / bucketSize);
+      const key = bucketKey(ix, iy);
+
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(i);
+    }
+
+    // For each bucket, check collisions in itself + neighbors (3x3)
+    // Use a pair-set to avoid duplicate resolves.
+    const seenPairs = new Set();
+
+    for (const [key, indices] of buckets.entries()) {
+      const [sx, sy] = key.split(",").map(Number);
+
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          const nkey = bucketKey(sx + ox, sy + oy);
+          const other = buckets.get(nkey);
+          if (!other) continue;
+
+          for (let aIdx = 0; aIdx < indices.length; aIdx++) {
+            const i = indices[aIdx];
+            for (let bIdx = 0; bIdx < other.length; bIdx++) {
+              const j = other[bIdx];
+              if (i === j) continue;
+
+              // normalize pair ordering
+              const p = i < j ? `${i}:${j}` : `${j}:${i}`;
+              if (seenPairs.has(p)) continue;
+              seenPairs.add(p);
+
+              resolvePair(circles[i], circles[j]);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // -----------------------------------------------
+  // Create circles
+  // -----------------------------------------------
   const circles = [];
   for (let i = 0; i < 60; i++) circles.push(new Circle());
 
@@ -295,7 +337,6 @@ async function main() {
     const dt = (time - lastTime) / 1000;
     lastTime = time;
 
-    // handle resize (important on mobile rotate)
     if (resizeCanvasToDisplaySize()) {
       gl.useProgram(shaderProgram);
       updateViewportAndAspect();
@@ -306,8 +347,8 @@ async function main() {
     // Update motion
     for (const c of circles) c.update(dt);
 
-    // NEW: resolve circle–circle collisions
-    resolveCircleCollisions(circles);
+    // Bucketed collisions
+    resolveCircleCollisionsBuckets(circles);
 
     // Draw
     for (const c of circles) c.draw();
