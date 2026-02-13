@@ -1,4 +1,4 @@
-const CACHE_NAME = "gravity.cache.v1";
+const CACHE_NAME = "gravity.cache.v2";
 
 const CORE_ASSETS = [
   "index.html",
