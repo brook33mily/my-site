@@ -1,255 +1,266 @@
-/* main.js — Bouncing Circles PWA (WebGL)
-   - Resizes to screen + handles iPhone orientation changes
-   - Uses real delta-time (dt) so speed is consistent
-   - SPEED knob to slow things down
-   - Circle-circle elastic collisions + wall bounces
-*/
+// main.js
+// Bouncing Circles + collisions + device orientation gravity (iPhone/PWA friendly)
 
 "use strict";
 
-// ===============================
-// CONFIG (tweak these)
-// ===============================
-const NUM_CIRCLES = 22;
-const MIN_R = 18;
-const MAX_R = 55;
+/* ---------------------------- Canvas Setup ---------------------------- */
 
-const SPEED = 0.50;            // 🔥 Lower = slower (try 0.25–0.70)
-const WALL_BOUNCE = 0.98;      // 1.0 perfectly bouncy, <1 loses energy
-const COLLISION_RESTITUTION = 0.98;
-const GLOBAL_DAMPING = 0.999;  // small velocity damping each step
-const MAX_DT = 1 / 30;         // clamp big frame jumps (tab switch, etc.)
-
-// Physics is in "pixel-ish" coordinates that match CSS pixels,
-// then converted to clip space for WebGL drawing.
-const BG = [0.78, 0.86, 0.82, 1.0]; // background (soft green)
-
-// ===============================
-// CANVAS + WEBGL SETUP
-// ===============================
-const canvas = document.getElementById("glcanvas");
-const gl = canvas.getContext("webgl", { antialias: true });
-
-if (!gl) {
-  alert("WebGL not supported in this browser.");
-  throw new Error("WebGL not supported");
+const canvas = document.getElementById("glcanvas") || document.querySelector("canvas");
+if (!canvas) {
+  throw new Error("No canvas found. Expected id='glcanvas' (or any <canvas>).");
 }
 
-// --- Resize support (fixes iPhone rotation) ---
-function resizeCanvasToScreen() {
+const ctx = canvas.getContext("2d", { alpha: false });
+
+function resizeCanvasToDisplaySize() {
   const dpr = window.devicePixelRatio || 1;
-  const cssW = window.innerWidth;
-  const cssH = window.innerHeight;
-  const w = Math.floor(cssW * dpr);
-  const h = Math.floor(cssH * dpr);
+  const rect = canvas.getBoundingClientRect();
 
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-    canvas.style.width = cssW + "px";
-    canvas.style.height = cssH + "px";
-    gl.viewport(0, 0, canvas.width, canvas.height);
+  const newWidth = Math.max(1, Math.floor(rect.width * dpr));
+  const newHeight = Math.max(1, Math.floor(rect.height * dpr));
+
+  if (canvas.width !== newWidth || canvas.height !== newHeight) {
+    canvas.width = newWidth;
+    canvas.height = newHeight;
   }
 }
+window.addEventListener("resize", resizeCanvasToDisplaySize);
+resizeCanvasToDisplaySize();
 
-resizeCanvasToScreen();
-window.addEventListener("resize", resizeCanvasToScreen);
-window.addEventListener("orientationchange", () => {
-  // iOS sometimes reports old dimensions immediately
-  setTimeout(resizeCanvasToScreen, 200);
-});
+/* ---------------------------- Utilities ---------------------------- */
 
-// ===============================
-// SHADERS (simple color pass-through)
-// ===============================
-const VERT_SRC = `
-attribute vec2 a_pos;
-attribute vec4 a_col;
-varying vec4 v_col;
-void main() {
-  v_col = a_col;
-  gl_Position = vec4(a_pos, 0.0, 1.0);
-}
-`;
-
-const FRAG_SRC = `
-precision mediump float;
-varying vec4 v_col;
-void main() {
-  gl_FragColor = v_col;
-}
-`;
-
-function compileShader(type, src) {
-  const sh = gl.createShader(type);
-  gl.shaderSource(sh, src);
-  gl.compileShader(sh);
-  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-    const err = gl.getShaderInfoLog(sh);
-    gl.deleteShader(sh);
-    throw new Error("Shader compile error: " + err);
-  }
-  return sh;
-}
-
-function makeProgram(vsSrc, fsSrc) {
-  const vs = compileShader(gl.VERTEX_SHADER, vsSrc);
-  const fs = compileShader(gl.FRAGMENT_SHADER, fsSrc);
-
-  const prog = gl.createProgram();
-  gl.attachShader(prog, vs);
-  gl.attachShader(prog, fs);
-  gl.linkProgram(prog);
-
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    const err = gl.getProgramInfoLog(prog);
-    gl.deleteProgram(prog);
-    throw new Error("Program link error: " + err);
-  }
-  return prog;
-}
-
-const program = makeProgram(VERT_SRC, FRAG_SRC);
-gl.useProgram(program);
-
-const aPosLoc = gl.getAttribLocation(program, "a_pos");
-const aColLoc = gl.getAttribLocation(program, "a_col");
-
-// Interleaved buffer: [x,y,r,g,b,a] per vertex
-const vbo = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-
-gl.enableVertexAttribArray(aPosLoc);
-gl.vertexAttribPointer(aPosLoc, 2, gl.FLOAT, false, 24, 0);
-
-gl.enableVertexAttribArray(aColLoc);
-gl.vertexAttribPointer(aColLoc, 4, gl.FLOAT, false, 24, 8);
-
-// ===============================
-// HELPERS
-// ===============================
 function rand(min, max) {
   return Math.random() * (max - min) + min;
-}
-
-function randInt(min, max) {
-  return Math.floor(rand(min, max + 1));
-}
-
-function randomColorRGBA() {
-  // bright-ish random
-  const r = rand(0.1, 0.95);
-  const g = rand(0.1, 0.95);
-  const b = rand(0.1, 0.95);
-  return [r, g, b, 1.0];
 }
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
-function circlesOverlap(c1, c2) {
-  const dx = c2.x - c1.x;
-  const dy = c2.y - c1.y;
-  const rr = c1.r + c2.r;
-  return (dx * dx + dy * dy) < (rr * rr);
+function dist2(ax, ay, bx, by) {
+  const dx = ax - bx;
+  const dy = ay - by;
+  return dx * dx + dy * dy;
 }
 
-// Convert pixel coords to clip space (-1..1)
-function pxToClipX(xPx) {
-  const cssW = window.innerWidth;
-  return (xPx / cssW) * 2 - 1;
-}
-function pxToClipY(yPx) {
-  const cssH = window.innerHeight;
-  // yPx goes down; clip y goes up
-  return 1 - (yPx / cssH) * 2;
-}
-function pxToClipR(rPx) {
-  // radius needs to scale differently for x/y if aspect changes,
-  // so we’ll build circle vertices in pixel space then convert each vertex.
-  return rPx;
+function randomColor() {
+  // Nice bright-ish colors
+  const r = Math.floor(rand(80, 255));
+  const g = Math.floor(rand(80, 255));
+  const b = Math.floor(rand(80, 255));
+  return `rgb(${r},${g},${b})`;
 }
 
-// ===============================
-// CIRCLE MODEL
-// ===============================
+/* ---------------------------- Physics Params ---------------------------- */
+
+const NUM_START = 12;
+const MIN_R = 12;
+const MAX_R = 34;
+
+const WALL_BOUNCE = 0.92;      // restitution against walls
+const COLLISION_BOUNCE = 0.98; // restitution between circles
+const AIR_FRICTION = 0.998;    // global damping each frame
+
+// Gravity defaults (desktop)
+let gravityX = 0;
+let gravityY = 0.18; // gentle down gravity on desktop
+
+// Orientation gravity control
+let orientationEnabled = false;
+const gravityStrength = 0.55;  // tweak: bigger = stronger tilt gravity
+const smoothFactor = 0.15;     // tweak: bigger = less smoothing (more jitter)
+
+/* ---------------------------- Circle Model ---------------------------- */
+
 class Circle {
-  constructor(x, y, vx, vy, r, color) {
-    this.x = x;     // in CSS pixels
+  constructor(x, y, r) {
+    this.x = x;
     this.y = y;
-    this.vx = vx;   // px/sec-ish
-    this.vy = vy;
     this.r = r;
-    this.color = color;
 
-    // Mass proportional to area
-    this.m = r * r;
+    this.vx = rand(-2.0, 2.0);
+    this.vy = rand(-1.5, 1.5);
+
+    this.color = randomColor();
+    this.mass = r * r; // area-based mass feel
   }
 }
 
 const circles = [];
 
-function spawnCircles() {
+/* ---------------------------- Spawn Helpers ---------------------------- */
+
+function overlapsAny(x, y, r) {
+  for (const c of circles) {
+    const rr = r + c.r;
+    if (dist2(x, y, c.x, c.y) < rr * rr) return true;
+  }
+  return false;
+}
+
+function spawnCircle(x = null, y = null) {
+  resizeCanvasToDisplaySize();
+  const w = canvas.width;
+  const h = canvas.height;
+
+  const r = rand(MIN_R, MAX_R);
+
+  // Choose spawn position
+  let sx = x ?? rand(r, w - r);
+  let sy = y ?? rand(r, h - r);
+
+  // If user clicked near edge, clamp inside
+  sx = clamp(sx, r, w - r);
+  sy = clamp(sy, r, h - r);
+
+  // Try a few times to avoid overlap
+  let tries = 0;
+  while (tries < 60 && overlapsAny(sx, sy, r)) {
+    sx = rand(r, w - r);
+    sy = rand(r, h - r);
+    tries++;
+  }
+
+  circles.push(new Circle(sx, sy, r));
+}
+
+function initScene() {
   circles.length = 0;
+  for (let i = 0; i < NUM_START; i++) spawnCircle();
+}
+initScene();
 
-  const W = window.innerWidth;
-  const H = window.innerHeight;
+/* ---------------------------- Input: Click/Tap ---------------------------- */
 
-  let attempts = 0;
-  while (circles.length < NUM_CIRCLES && attempts < 5000) {
-    attempts++;
+// Tap/click: pop a circle if you hit one; otherwise add a new circle
+canvas.addEventListener("pointerdown", (e) => {
+  // iOS permission must be user-initiated; enable on first interaction.
+  if (!orientationEnabled) enableOrientation();
 
-    const r = rand(MIN_R, MAX_R);
-    const x = rand(r, W - r);
-    const y = rand(r, H - r);
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const mx = (e.clientX - rect.left) * dpr;
+  const my = (e.clientY - rect.top) * dpr;
 
-    // initial velocity: keep modest so it doesn’t look chaotic
-    const vx = rand(-120, 120);
-    const vy = rand(-120, 120);
-
-    const c = new Circle(x, y, vx, vy, r, randomColorRGBA());
-
-    let ok = true;
-    for (const other of circles) {
-      if (circlesOverlap(c, other)) {
-        ok = false;
-        break;
-      }
+  // Find topmost circle under pointer (last drawn is "top")
+  for (let i = circles.length - 1; i >= 0; i--) {
+    const c = circles[i];
+    if (dist2(mx, my, c.x, c.y) <= c.r * c.r) {
+      circles.splice(i, 1); // pop
+      return;
     }
+  }
 
-    if (ok) circles.push(c);
+  // Otherwise add a circle at tap location
+  spawnCircle(mx, my);
+});
+
+/* ---------------------------- Device Orientation Gravity ---------------------------- */
+
+function enableOrientation() {
+  // Already enabled
+  if (orientationEnabled) return;
+
+  const addListener = () => {
+    window.addEventListener("deviceorientation", handleOrientation, true);
+    orientationEnabled = true;
+  };
+
+  // iOS 13+ requires permission
+  if (typeof DeviceOrientationEvent !== "undefined" &&
+      typeof DeviceOrientationEvent.requestPermission === "function") {
+    DeviceOrientationEvent.requestPermission()
+      .then((state) => {
+        if (state === "granted") addListener();
+      })
+      .catch(() => {
+        // If denied or errors, we just keep desktop gravity
+      });
+  } else {
+    // Android / other browsers
+    addListener();
   }
 }
 
-spawnCircles();
+// Smoothly map beta/gamma to gravityX/gravityY
+function handleOrientation(event) {
+  const beta = event.beta;   // front/back tilt (-180..180)
+  const gamma = event.gamma; // left/right tilt (-90..90)
 
-// Re-spawn if screen size changes drastically (optional but nice)
-let lastW = window.innerWidth;
-let lastH = window.innerHeight;
-window.addEventListener("resize", () => {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  if (Math.abs(w - lastW) > 80 || Math.abs(h - lastH) > 80) {
-    lastW = w;
-    lastH = h;
-    spawnCircles();
-  }
-});
+  if (beta == null || gamma == null) return;
 
-// ===============================
-// PHYSICS
-// ===============================
-function resolveWallCollisions(c) {
-  const W = window.innerWidth;
-  const H = window.innerHeight;
+  // Convert degrees to a usable acceleration vector
+  // gamma right => +x, beta forward => +y
+  const targetGX = clamp(gamma / 45, -1, 1) * gravityStrength;
+  const targetGY = clamp(beta / 45, -1, 1) * gravityStrength;
+
+  // Smooth to reduce jitter
+  gravityX = gravityX + (targetGX - gravityX) * smoothFactor;
+  gravityY = gravityY + (targetGY - gravityY) * smoothFactor;
+}
+
+/* ---------------------------- Collisions ---------------------------- */
+
+// Resolve circle-circle collisions using impulse response + positional correction
+function resolveCircleCollision(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dist = Math.hypot(dx, dy);
+  const minDist = a.r + b.r;
+
+  // No collision
+  if (dist === 0 || dist >= minDist) return;
+
+  // Normal
+  const nx = dx / dist;
+  const ny = dy / dist;
+
+  // Positional correction to separate circles (prevents sinking)
+  const penetration = minDist - dist;
+  const totalMass = a.mass + b.mass;
+  const aShare = (b.mass / totalMass);
+  const bShare = (a.mass / totalMass);
+
+  a.x -= nx * penetration * aShare;
+  a.y -= ny * penetration * aShare;
+  b.x += nx * penetration * bShare;
+  b.y += ny * penetration * bShare;
+
+  // Relative velocity along normal
+  const rvx = b.vx - a.vx;
+  const rvy = b.vy - a.vy;
+  const velAlongNormal = rvx * nx + rvy * ny;
+
+  // If they're separating after correction, skip impulse
+  if (velAlongNormal > 0) return;
+
+  const e = COLLISION_BOUNCE; // restitution
+
+  // Impulse scalar
+  const invMassA = 1 / a.mass;
+  const invMassB = 1 / b.mass;
+  const j = -(1 + e) * velAlongNormal / (invMassA + invMassB);
+
+  // Apply impulse
+  const ix = j * nx;
+  const iy = j * ny;
+
+  a.vx -= ix * invMassA;
+  a.vy -= iy * invMassA;
+  b.vx += ix * invMassB;
+  b.vy += iy * invMassB;
+}
+
+function resolveWallCollision(c) {
+  const w = canvas.width;
+  const h = canvas.height;
 
   // Left/right
   if (c.x - c.r < 0) {
     c.x = c.r;
     c.vx = Math.abs(c.vx) * WALL_BOUNCE;
-  } else if (c.x + c.r > W) {
-    c.x = W - c.r;
+  } else if (c.x + c.r > w) {
+    c.x = w - c.r;
     c.vx = -Math.abs(c.vx) * WALL_BOUNCE;
   }
 
@@ -257,147 +268,94 @@ function resolveWallCollisions(c) {
   if (c.y - c.r < 0) {
     c.y = c.r;
     c.vy = Math.abs(c.vy) * WALL_BOUNCE;
-  } else if (c.y + c.r > H) {
-    c.y = H - c.r;
+  } else if (c.y + c.r > h) {
+    c.y = h - c.r;
     c.vy = -Math.abs(c.vy) * WALL_BOUNCE;
   }
 }
 
-function resolveCircleCollisions() {
-  // Pairwise impulse-based collision + positional correction
+/* ---------------------------- Main Loop ---------------------------- */
+
+let lastT = performance.now();
+
+function step(t) {
+  resizeCanvasToDisplaySize();
+  const dt = Math.min(0.033, (t - lastT) / 1000); // clamp dt for stability
+  lastT = t;
+
+  // Physics update
+  for (const c of circles) {
+    // gravity (device tilt updates gravityX/Y if enabled)
+    c.vx += gravityX;
+    c.vy += gravityY;
+
+    // integrate
+    c.x += c.vx * (dt * 60);
+    c.y += c.vy * (dt * 60);
+
+    // damping
+    c.vx *= AIR_FRICTION;
+    c.vy *= AIR_FRICTION;
+
+    // walls
+    resolveWallCollision(c);
+  }
+
+  // Circle-circle collisions (pairwise)
   for (let i = 0; i < circles.length; i++) {
     for (let j = i + 1; j < circles.length; j++) {
-      const a = circles[i];
-      const b = circles[j];
-
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const dist2 = dx * dx + dy * dy;
-      const rSum = a.r + b.r;
-
-      if (dist2 >= rSum * rSum) continue;
-
-      const dist = Math.sqrt(dist2) || 0.0001;
-      const nx = dx / dist;
-      const ny = dy / dist;
-
-      // Positional correction to separate overlapping circles
-      const penetration = rSum - dist;
-      const totalMass = a.m + b.m;
-      const aMove = penetration * (b.m / totalMass);
-      const bMove = penetration * (a.m / totalMass);
-
-      a.x -= nx * aMove;
-      a.y -= ny * aMove;
-      b.x += nx * bMove;
-      b.y += ny * bMove;
-
-      // Relative velocity along normal
-      const rvx = b.vx - a.vx;
-      const rvy = b.vy - a.vy;
-      const velAlongNormal = rvx * nx + rvy * ny;
-
-      // If they’re moving apart after correction, skip impulse
-      if (velAlongNormal > 0) continue;
-
-      // Impulse scalar
-      const e = COLLISION_RESTITUTION;
-      const jImpulse = -(1 + e) * velAlongNormal / (1 / a.m + 1 / b.m);
-
-      const ix = jImpulse * nx;
-      const iy = jImpulse * ny;
-
-      a.vx -= ix / a.m;
-      a.vy -= iy / a.m;
-      b.vx += ix / b.m;
-      b.vy += iy / b.m;
+      resolveCircleCollision(circles[i], circles[j]);
     }
   }
+
+  // Draw
+  draw();
+
+  requestAnimationFrame(step);
 }
 
-function updatePhysics(dt) {
-  // move
+function draw() {
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // background
+  ctx.fillStyle = "black";
+  ctx.fillRect(0, 0, w, h);
+
+  // circles
   for (const c of circles) {
-    c.x += c.vx * dt;
-    c.y += c.vy * dt;
-
-    // mild damping so it feels calmer
-    c.vx *= GLOBAL_DAMPING;
-    c.vy *= GLOBAL_DAMPING;
-
-    resolveWallCollisions(c);
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = c.color;
+    ctx.fill();
   }
 
-  // resolve circle collisions after movement
-  resolveCircleCollisions();
+  // UI text
+  ctx.fillStyle = "white";
+  ctx.font = `${Math.max(12, Math.floor(14 * (window.devicePixelRatio || 1)))}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+  ctx.fillText(
+    orientationEnabled
+      ? "Tilt to change gravity • Tap circle to pop • Tap empty space to add"
+      : "Tap once to enable tilt gravity • Tap circle to pop • Tap empty space to add",
+    12,
+    22
+  );
+
+  // Show gravity vector (tiny indicator)
+  const gx = gravityX;
+  const gy = gravityY;
+  const cx = 24;
+  const cy = 44;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+  ctx.strokeStyle = "white";
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + gx * 25, cy + gy * 25);
+  ctx.stroke();
 }
 
-// ===============================
-// RENDERING (build triangles for circles)
-// ===============================
-function pushCircleTriangles(verts, c) {
-  // Choose segments based on radius (bigger = smoother)
-  const seg = clamp(Math.floor(c.r * 0.6), 16, 60);
-
-  const color = c.color;
-  const cx = c.x;
-  const cy = c.y;
-  const r = c.r;
-
-  // Triangle fan -> triangles: center, p_i, p_{i+1}
-  for (let i = 0; i < seg; i++) {
-    const a0 = (i / seg) * Math.PI * 2;
-    const a1 = ((i + 1) / seg) * Math.PI * 2;
-
-    const x0 = cx + Math.cos(a0) * r;
-    const y0 = cy + Math.sin(a0) * r;
-    const x1 = cx + Math.cos(a1) * r;
-    const y1 = cy + Math.sin(a1) * r;
-
-    // center
-    verts.push(pxToClipX(cx), pxToClipY(cy), color[0], color[1], color[2], color[3]);
-    // p0
-    verts.push(pxToClipX(x0), pxToClipY(y0), color[0], color[1], color[2], color[3]);
-    // p1
-    verts.push(pxToClipX(x1), pxToClipY(y1), color[0], color[1], color[2], color[3]);
-  }
-}
-
-function drawScene() {
-  resizeCanvasToScreen();
-
-  gl.clearColor(BG[0], BG[1], BG[2], BG[3]);
-  gl.clear(gl.COLOR_BUFFER_BIT);
-
-  const verts = [];
-  for (const c of circles) {
-    pushCircleTriangles(verts, c);
-  }
-
-  const data = new Float32Array(verts);
-  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
-
-  gl.drawArrays(gl.TRIANGLES, 0, data.length / 6);
-}
-
-// ===============================
-// ANIMATION LOOP (stable dt + speed knob)
-// ===============================
-let lastTime = performance.now();
-
-function animate(now) {
-  let dt = (now - lastTime) / 1000;
-  lastTime = now;
-
-  dt = Math.min(dt, MAX_DT);
-  dt *= SPEED; // 🔥 slow it down here
-
-  updatePhysics(dt);
-  drawScene();
-
-  requestAnimationFrame(animate);
-}
-
-requestAnimationFrame(animate);
+requestAnimationFrame(step);
 
