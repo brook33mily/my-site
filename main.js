@@ -77,6 +77,10 @@ async function main() {
   // ---------- Canvas / GL ----------
   const canvas = document.getElementById("glcanvas");
 
+  canvas.width = canvas.clientWidth;
+  canvas.height = canvas.clientHeight;
+
+
   // PWA instructions: set width/height from client size (not in HTML)
   canvas.width = canvas.clientWidth;
   canvas.height = canvas.clientHeight;
@@ -86,6 +90,15 @@ async function main() {
     alert("WebGL not supported");
     return;
   }
+
+  function resize() {
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
 
   // ---------- Compile / Link program ----------
   const program = initShaderProgram(gl, vertexShaderText, fragmentShaderText);

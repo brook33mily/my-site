@@ -1,7 +1,7 @@
 {
   "name": "Bouncing Circles",
   "short_name": "Circles",
-  "start_url": "index.html",
+  "start_url": "./",
   "description": "Circles bounce around",
   "orientation": "portrait",
   "display": "fullscreen",

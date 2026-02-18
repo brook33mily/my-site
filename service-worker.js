@@ -1,17 +1,17 @@
-const CACHE_NAME = "bouncing-circles-pwa-v1";
+const CACHE_NAME = "bouncing-circles-pwa-v2";
 
-const ASSETS = [
-  "index.html",
-  "main.js",
-  "manifest.json",
-  "icons/icon-192.png",
-  "icons/icon-512.png",
-  "icons/apple-touch-icon.png"
+const CORE_ASSETS = [
+  "./",
+  "./index.html",
+  "./main.js",
+  "./manifest.json",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png"
 ];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_ASSETS))
   );
 });
 
@@ -23,18 +23,33 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// Only cache safe requests:
+// - http/https
+// - same-origin
+// - GET only
 self.addEventListener("fetch", (event) => {
+  const req = event.request;
+
+  if (req.method !== "GET") return;
+
+  const url = new URL(req.url);
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") return;
+
+  if (url.origin !== self.location.origin) return;
+
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return (
-        cached ||
-        fetch(event.request).then((resp) => {
-          // Runtime cache update (optional)
+    caches.match(req).then((cached) => {
+      if (cached) return cached;
+
+      return fetch(req).then((resp) => {
+        // Only cache "basic" (same-origin) successful responses
+        if (resp && resp.ok && resp.type === "basic") {
           const copy = resp.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-          return resp;
-        }).catch(() => cached)
-      );
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+        }
+        return resp;
+      });
     })
   );
 });
